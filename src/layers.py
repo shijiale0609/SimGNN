@@ -63,6 +63,7 @@ class TenorNetworkModule(torch.nn.Module):
 
         self.weight_matrix_block = torch.nn.Parameter(torch.Tensor(self.args.tensor_neurons,
                                                                    2*self.args.filters_3))
+        
         self.bias = torch.nn.Parameter(torch.Tensor(self.args.tensor_neurons, 1))
 
     def init_parameters(self):
@@ -83,7 +84,17 @@ class TenorNetworkModule(torch.nn.Module):
         scoring = torch.mm(torch.t(embedding_1), self.weight_matrix.view(self.args.filters_3, -1))
         scoring = scoring.view(self.args.filters_3, self.args.tensor_neurons)
         scoring = torch.mm(torch.t(scoring), embedding_2)
+
+        scoring_r = torch.mm(torch.t(embedding_2), self.weight_matrix.view(self.args.filters_3, -1))
+        scoring_r = scoring_r.view(self.args.filters_3, self.args.tensor_neurons)
+        scoring_r = torch.mm(torch.t(scoring_r), embedding_1)
+        
         combined_representation = torch.cat((embedding_1, embedding_2))
+        combined_representation_r = torch.cat((embedding_2, embedding_1))
+        
         block_scoring = torch.mm(self.weight_matrix_block, combined_representation)
-        scores = torch.nn.functional.relu(scoring + block_scoring + self.bias)
+        block_scoring_r = torch.mm(self.weight_matrix_block, combined_representation_r)
+        
+        scores = torch.nn.functional.relu(scoring + scoring_r +  block_scoring + block_scoring_r + self.bias)
+        
         return scores

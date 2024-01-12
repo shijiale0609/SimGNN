@@ -4,10 +4,18 @@ import glob
 import torch
 import random
 import numpy as np
+import time
 from tqdm import tqdm, trange
 from torch_geometric.nn import GCNConv
 from layers import AttentionModule, TenorNetworkModule
 from utils import process_pair, calculate_loss, calculate_normalized_ged
+from rdkit import Chem
+from rdkit import DataStructs
+from rdkit.Chem import AllChem
+from rdkit.Chem import MACCSkeys
+from rdkit.Chem.AtomPairs import Pairs
+from rdkit.Chem import rdMolDescriptors
+import json
 
 class SimGNN(torch.nn.Module):
     """
@@ -22,6 +30,7 @@ class SimGNN(torch.nn.Module):
         super(SimGNN, self).__init__()
         self.args = args
         self.number_labels = number_of_labels
+        print("number_labels:",self.number_labels)
         self.setup_layers()
 
     def calculate_bottleneck_features(self):
@@ -30,6 +39,7 @@ class SimGNN(torch.nn.Module):
         """
         if self.args.histogram == True:
             self.feature_count = self.args.tensor_neurons + self.args.bins
+            print(self.feature_count, self.args.tensor_neurons, self.args.bins)
         else:
             self.feature_count = self.args.tensor_neurons
 
@@ -136,8 +146,16 @@ class SimGNNTrainer(object):
         Collecting the unique node idsentifiers.
         """
         print("\nEnumerating unique labels.\n")
+        # load
         self.training_graphs = glob.glob(self.args.training_graphs + "*.json")
+	# sort
+        self.training_graphs.sort(key=lambda name: int(name[len(self.args.training_graphs):-5]))
+
+        # load
         self.testing_graphs = glob.glob(self.args.testing_graphs + "*.json")
+	# sort
+        self.testing_graphs.sort(key=lambda name: int(name[len(self.args.testing_graphs):-5]))
+
         graph_pairs = self.training_graphs + self.testing_graphs
         self.global_labels = set()
         for graph_pair in tqdm(graph_pairs):
@@ -146,7 +164,10 @@ class SimGNNTrainer(object):
             self.global_labels = self.global_labels.union(set(data["labels_2"]))
         self.global_labels = sorted(self.global_labels)
         self.global_labels = {val:index  for index, val in enumerate(self.global_labels)}
-        self.number_of_labels = len(self.global_labels)
+        self.number_of_labels = 128#len(self.global_labels)
+        with open('/Users/jialeshi/Github/GLAMOUR2_non_direct_no_bond/monomers_dict_full.json','r') as json_file:
+            monomers_fp_dict = json.load(json_file)
+        self.monomers_fp_dict = monomers_fp_dict
 
     def create_batches(self):
         """
@@ -177,10 +198,11 @@ class SimGNNTrainer(object):
         features_1, features_2 = [], []
 
         for n in data["labels_1"]:
-            features_1.append([1.0 if self.global_labels[n] == i else 0.0 for i in self.global_labels.values()])
+            features_1.append(self.monomers_fp_dict[n])
 
         for n in data["labels_2"]:
-            features_2.append([1.0 if self.global_labels[n] == i else 0.0 for i in self.global_labels.values()])
+
+            features_2.append(self.monomers_fp_dict[n])
 
         features_1 = torch.FloatTensor(np.array(features_1))
         features_2 = torch.FloatTensor(np.array(features_2))
@@ -189,6 +211,8 @@ class SimGNNTrainer(object):
         new_data["edge_index_2"] = edges_2
 
         new_data["features_1"] = features_1
+        #print(features_1.shape)
+        #print(features_1[0], features_1[1])
         new_data["features_2"] = features_2
 
         norm_ged = data["ged"]/(0.5*(len(data["labels_1"])+len(data["labels_2"])))
@@ -209,11 +233,14 @@ class SimGNNTrainer(object):
             data = self.transfer_to_torch(data)
             target = data["target"]
             prediction = self.model(data)
-            losses = losses + torch.nn.functional.mse_loss(data["target"], prediction)
+            losses = losses + torch.nn.functional.mse_loss(data["target"].unsqueeze(1), prediction)
         losses.backward(retain_graph=True)
         self.optimizer.step()
         loss = losses.item()
         return loss
+
+    def save_model_state(self, model_state ):
+        torch.save(self.model.state_dict(), model_state)
 
     def fit(self):
         """
@@ -225,18 +252,73 @@ class SimGNNTrainer(object):
                                           lr=self.args.learning_rate,
                                           weight_decay=self.args.weight_decay)
 
-        self.model.train()
         epochs = trange(self.args.epochs, leave=True, desc="Epoch")
+        train_loss_epochs = []
+        test_loss_epochs = []
+        
         for epoch in epochs:
             batches = self.create_batches()
             self.loss_sum = 0
             main_index = 0
+            #train_loss = 0
+            self.model.train()
             for index, batch in tqdm(enumerate(batches), total=len(batches), desc="Batches"):
                 loss_score = self.process_batch(batch)
                 main_index = main_index + len(batch)
                 self.loss_sum = self.loss_sum + loss_score * len(batch)
                 loss = self.loss_sum/main_index
                 epochs.set_description("Epoch (Loss=%g)" % round(loss, 5))
+                #train_loss = loss
+                
+            #train_loss_epochs.append(self.loss_sum)
+            #if self.loss_sum == min(loss_sum_epochs):
+            #    self.save_model_state(model_state = "model_min_loss")
+                
+            self.model.eval()
+            with torch.no_grad():
+                self.test_scores = []
+                self.test_ground_truth = []
+                #targets = []
+                #predictions = []
+                for test_graph_pair in tqdm(self.testing_graphs):
+                    test_data = process_pair(test_graph_pair)
+                    self.test_ground_truth.append(calculate_normalized_ged(test_data))
+                    test_data = self.transfer_to_torch(test_data)
+                    test_target = test_data["target"]
+                    test_prediction = self.model(test_data)
+                    self.test_scores.append(calculate_loss(test_prediction, test_target))
+
+                self.train_scores = []
+                self.train_ground_truth = []
+                
+                for train_graph_pair in tqdm(self.training_graphs):
+                    train_data = process_pair(train_graph_pair)
+                    self.train_ground_truth.append(calculate_normalized_ged(train_data))
+                    train_data = self.transfer_to_torch(train_data)
+                    train_target = train_data["target"]
+                    train_prediction = self.model(train_data)
+                    self.train_scores.append(calculate_loss(train_prediction, train_target))
+            
+            
+            model_test_error = np.mean(self.test_scores)  
+            test_loss_epochs.append(model_test_error)
+            
+            model_train_error = np.mean(self.train_scores)  
+            train_loss_epochs.append(model_train_error)
+            
+            print("test error:", model_test_error)
+            print("train error:",model_train_error)
+            np.save("train_loss_sum_epochs.npy" ,np.array(train_loss_epochs))
+            np.save("test_loss_sum_epochs.npy" ,np.array(test_loss_epochs))
+
+            if  test_loss_epochs[-1] == min(test_loss_epochs):
+                    self.save_model_state(model_state = "model_min_loss")
+                    
+
+        np.save("train_loss_sum_epochs.npy" ,np.array(train_loss_epochs))
+        np.save("test_loss_sum_epochs.npy" ,np.array(test_loss_epochs))
+
+
 
     def score(self):
         """
@@ -246,14 +328,28 @@ class SimGNNTrainer(object):
         self.model.eval()
         self.scores = []
         self.ground_truth = []
+        targets = []
+        predictions = []
+        predictions_time = []
+
         for graph_pair in tqdm(self.testing_graphs):
             data = process_pair(graph_pair)
             self.ground_truth.append(calculate_normalized_ged(data))
             data = self.transfer_to_torch(data)
             target = data["target"]
+            start = time.time()
             prediction = self.model(data)
+            end = time.time()
+            #print(target, prediction, end-start)
+            #print("target,prediction:", self.ground_truth, target.item(), prediction[0].item())
+            targets.append(target.item())
+            predictions.append(prediction[0].item())
+            predictions_time.append(end-start)
             self.scores.append(calculate_loss(prediction, target))
         self.print_evaluation()
+        np.save("targets.npy" ,np.array(targets) )
+        np.save("predictions.npy" ,np.array(predictions) )
+        np.save("predictions_time.npy" ,np.array(predictions_time) )
 
     def print_evaluation(self):
         """

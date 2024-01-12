@@ -44,4 +44,5 @@ def calculate_normalized_ged(data):
     :return norm_ged: Normalized GED score.
     """
     norm_ged = data["ged"]/(0.5*(len(data["labels_1"])+len(data["labels_2"])))
+    #norm_ged = data["ged"]/(max( (len(data["labels_1"]) + len(data["graph_1"])), (len(data["labels_2"]) + len(data["graph_2"]))) - data["ged"])
     return norm_ged

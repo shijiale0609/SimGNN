@@ -90,4 +90,10 @@ def parameter_parser():
                         default=None,
                         help="Load a pretrained model")
 
+    parser.add_argument("--restart",
+                        action="store_true",
+                        help="restart from loading a pretrained model")
+
+    parser.set_defaults(restart=False)
+
     return parser.parse_args()
